@@ -13,6 +13,7 @@ Your reMarkable tablet is a powerful tool for thinking, note-taking, and researc
 - **Handwriting OCR** — Convert handwritten notes to searchable text
 - **PDF & EPUB support** — Extract text from documents, plus your annotations
 - **Robust page rendering** — Renders pages locally and automatically falls back to a source PDF when the local stroke renderer can't (USB/SSH use the tablet's own PDF export; cloud uses the original source PDF), so images work across firmware versions and even without system graphics libraries installed
+- **Write back to your tablet** — Render Markdown to a PDF and upload it in one step (no local file needed), so AI can send notes, reports, and summaries straight to your device
 - **Smart search** — Find content across your entire library
 - **Second brain integration** — Use with Obsidian, note-taking apps, or any AI workflow
 
@@ -232,6 +233,56 @@ Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remark
 
 ---
 
+## Open WebUI Integration
+
+[Open WebUI](https://github.com/open-webui/open-webui)'s native MCP client supports **only Streamable HTTP** — it cannot launch a stdio MCP server like VS Code can. To connect it, run remarkable-mcp over HTTP with the bundled bridge script, which serves the full toolset (including `remarkable_markdown_to_pdf`) at `http://127.0.0.1:8000/mcp`.
+
+### 1. Run the HTTP bridge
+
+The bridge uses **cloud mode** (requires a reMarkable Connect subscription), so first make sure a token is configured — either `REMARKABLE_TOKEN` or a saved `~/.rmapi` file (see [Cloud Mode Setup](#-cloud-mode-wireless)).
+
+```bash
+git clone https://github.com/SamMorrowDrums/remarkable-mcp.git
+cd remarkable-mcp
+uv sync --all-extras
+# with your cloud token configured (e.g. export REMARKABLE_TOKEN=...)
+.venv/bin/python remarkable_mcp_http.py
+```
+
+The server binds to `127.0.0.1:8000` by default and serves the MCP endpoint at `/mcp`. Only localhost is bound — Open WebUI must be running on the same host (or you can point it at a forwarded port).
+
+### 2. Add it in Open WebUI
+
+1. Open **Admin Panel → Settings → Connections** (MCP Servers)
+2. Click **+ Add Server**
+3. Name it `remarkable`, select **HTTP** transport, and set URL to `http://127.0.0.1:8000/mcp`
+4. Save — Open WebUI discovers and lists all remarkable tools automatically
+
+The tools then work like any Open WebUI MCP tools: ask a model to read a document, search your library, or send a Markdown summary to the tablet via `remarkable_markdown_to_pdf`.
+
+### Tuning
+
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `REMARKABLE_MCP_HOST` | `127.0.0.1` | Address the HTTP bridge binds to |
+| `REMARKABLE_MCP_PORT` | `8000` | Port the HTTP bridge listens on |
+
+### Run it as a service (NixOS)
+
+The repository includes `remarkable-mcp-bridge.nix`, a NixOS module that runs the bridge as a `systemd` service (restarting on failure, with `tesseract` on PATH for offline OCR). Import it and set:
+
+```nix
+services.remarkable-mcp = {
+  enable = true;
+  python = "/opt/remarkable-mcp/.venv/bin/python";
+  launcher = "/opt/remarkable-mcp/remarkable_mcp_http.py";
+};
+```
+
+The service user must own the cloud token (`~/.rmapi`) and have read access to the venv and launcher paths.
+
+---
+
 ## Tools
 
 | Tool | Description |
@@ -242,8 +293,9 @@ Or copy the `SKILL.md` from this repository into your `~/.openclaw/skills/remark
 | `remarkable_recent` | Get recently modified documents |
 | `remarkable_status` | Check connection status and the per-transport capability matrix |
 | `remarkable_image` | Get PNG/SVG images of pages (supports OCR via sampling) |
+| `remarkable_markdown_to_pdf` | Convert Markdown text to a PDF and upload it to the tablet |
 
-These six tools are **read-only** and return structured JSON with hints for next actions. **Write tools** (`remarkable_upload`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`, and `remarkable_author` for native ink/notebooks) are enabled by default — pass `--read-only` to disable them — see [Write Tools](#write-tools-cloud-ssh--usb-web). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
+These seven tools are **read-only** and return structured JSON with hints for next actions. **Write tools** (`remarkable_upload`, `remarkable_markdown_to_pdf`, `remarkable_mkdir`, `remarkable_move`, `remarkable_rename`, `remarkable_delete`, and `remarkable_author` for native ink/notebooks) are enabled by default — pass `--read-only` to disable them — see [Write Tools](#write-tools-cloud-ssh--usb-web). An interactive **canvas app** (`remarkable_canvas`) is also registered automatically for clients that support [MCP Apps](#interactive-canvas-app-mcp-apps).
 
 📖 **[Full Tools Documentation](docs/tools.md)**
 
@@ -479,6 +531,7 @@ Or set the environment variable:
 | Tool | Description |
 |------|-------------|
 | `remarkable_upload(file_path, parent_folder, document_name)` | Upload a PDF or EPUB file (all modes; USB web ignores folder/name and uploads to root) |
+| `remarkable_markdown_to_pdf(markdown, document_name, parent_folder)` | Render Markdown to a PDF and upload it — no local file needed (all modes; USB web ignores folder/name and uploads to root) |
 | `remarkable_mkdir(folder_name, parent)` | Create a new folder (cloud and SSH) |
 | `remarkable_move(document, dest_folder)` | Move a document or folder (cloud and SSH) |
 | `remarkable_rename(document, new_name)` | Rename a document or folder (cloud and SSH) |
@@ -497,6 +550,13 @@ Or set the environment variable:
 ```python
 # Upload a PDF
 remarkable_upload("paper.pdf", parent_folder="/Research")
+
+# Render Markdown to a PDF and upload it (no local file needed)
+remarkable_markdown_to_pdf("# Meeting Notes\n\n- Action item 1\n- Action item 2")
+
+# Render Markdown to a PDF and save it to a folder with a custom name
+remarkable_markdown_to_pdf("# Q4 Report\n\nRevenue is up 20%.",
+    document_name="Q4 Report", parent_folder="/Reports")
 
 # Create a folder
 remarkable_mkdir("2024 Archive", parent="/Archive")

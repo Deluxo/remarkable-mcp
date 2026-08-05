@@ -113,10 +113,10 @@ class TestMCPServerInitialization:
         """Cloud default: 6 read tools + always-on canvas + 5 write tools.
 
         ``remarkable_author`` is SSH-only and therefore hidden in cloud mode, so
-        the default (cloud) surface is 12 tools, not 13.
+        the default (cloud) surface is 13 tools, not 14.
         """
         tools = await mcp.list_tools()
-        assert len(tools) == 12, f"Expected 12 tools, got {len(tools)}"
+        assert len(tools) == 13, f"Expected 13 tools, got {len(tools)}"
 
     @pytest.mark.asyncio
     async def test_tool_schemas(self):
@@ -1189,7 +1189,7 @@ class TestE2E:
         """Test that server can list all tools (e2e)."""
         tools = await mcp.list_tools()
 
-        assert len(tools) == 12
+        assert len(tools) == 13
 
         # Check each tool has required properties and starts with remarkable_
         for tool in tools:
@@ -2650,6 +2650,7 @@ class TestWriteTools:
 
         write_tool_names = [
             "remarkable_upload",
+            "remarkable_markdown_to_pdf",
             "remarkable_mkdir",
             "remarkable_move",
             "remarkable_rename",
@@ -2678,6 +2679,7 @@ class TestWriteTools:
 
             write_tool_names = [
                 "remarkable_upload",
+                "remarkable_markdown_to_pdf",
                 "remarkable_mkdir",
                 "remarkable_move",
                 "remarkable_rename",
@@ -2690,6 +2692,7 @@ class TestWriteTools:
             # Clean up: remove registered tools to not affect other tests
             for name in [
                 "remarkable_upload",
+                "remarkable_markdown_to_pdf",
                 "remarkable_mkdir",
                 "remarkable_move",
                 "remarkable_rename",
@@ -2768,6 +2771,7 @@ class TestWriteTools:
         finally:
             for name in [
                 "remarkable_upload",
+                "remarkable_markdown_to_pdf",
                 "remarkable_mkdir",
                 "remarkable_move",
                 "remarkable_rename",
@@ -2796,6 +2800,7 @@ class TestWriteTools:
             finally:
                 for name in [
                     "remarkable_upload",
+                    "remarkable_markdown_to_pdf",
                     "remarkable_mkdir",
                     "remarkable_move",
                     "remarkable_rename",
@@ -2819,6 +2824,7 @@ class TestWriteTools:
                 if t.name
                 in (
                     "remarkable_upload",
+                    "remarkable_markdown_to_pdf",
                     "remarkable_mkdir",
                     "remarkable_move",
                     "remarkable_rename",
@@ -2832,6 +2838,7 @@ class TestWriteTools:
         finally:
             for name in [
                 "remarkable_upload",
+                "remarkable_markdown_to_pdf",
                 "remarkable_mkdir",
                 "remarkable_move",
                 "remarkable_rename",
@@ -2880,6 +2887,7 @@ class TestWriteTools:
                 os.unlink(pdf_path)
                 for name in [
                     "remarkable_upload",
+                    "remarkable_markdown_to_pdf",
                     "remarkable_mkdir",
                     "remarkable_move",
                     "remarkable_rename",
@@ -2907,6 +2915,7 @@ class TestWriteTools:
             finally:
                 for name in [
                     "remarkable_upload",
+                    "remarkable_markdown_to_pdf",
                     "remarkable_mkdir",
                     "remarkable_move",
                     "remarkable_rename",
@@ -2945,6 +2954,7 @@ class TestWriteTools:
                 for name in [
                     "remarkable_author",
                     "remarkable_upload",
+                    "remarkable_markdown_to_pdf",
                     "remarkable_mkdir",
                     "remarkable_move",
                     "remarkable_rename",
@@ -2962,6 +2972,99 @@ class TestWriteTools:
                 assert "remarkable_author" not in names
             finally:
                 mcp._tool_manager._tools.pop("remarkable_author", None)
+
+    @pytest.mark.asyncio
+    async def test_markdown_to_pdf_dispatches_to_cloud(self):
+        """Markdown-to-PDF in cloud mode renders a PDF and uploads it."""
+        from remarkable_mcp.write_tools import register_write_tools
+
+        env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
+        env.pop("REMARKABLE_USE_USB_WEB", None)
+        env.pop("REMARKABLE_READ_ONLY", None)  # write is enabled by default
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            try:
+                mock_doc = Mock()
+                mock_doc.id = "md-doc-id"
+                mock_client = Mock(spec=["get_meta_items", "upload_document"])
+                mock_client.get_meta_items.return_value = []
+                mock_client.upload_document.return_value = mock_doc
+
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=mock_client):
+                    result = await mcp.call_tool(
+                        "remarkable_markdown_to_pdf",
+                        {"markdown": "# Title\n\nSome **bold** text.", "document_name": "MD Doc"},
+                    )
+                data = json.loads(result[0][0].text)
+                assert data["uploaded"] is True
+                assert data["transport"] == "cloud"
+                assert data["uuid"] == "md-doc-id"
+                mock_client.upload_document.assert_called_once()
+                # content, name, ext, parent_id
+                args = mock_client.upload_document.call_args[0]
+                assert args[0].startswith(b"%PDF"), "rendered bytes are not a PDF"
+                assert args[1] == "MD Doc"
+                assert args[2] == "pdf"
+                assert args[3] == ""  # root
+            finally:
+                for name in [
+                    "remarkable_upload",
+                    "remarkable_markdown_to_pdf",
+                    "remarkable_mkdir",
+                    "remarkable_move",
+                    "remarkable_rename",
+                    "remarkable_delete",
+                ]:
+                    mcp._tool_manager._tools.pop(name, None)
+
+    @pytest.mark.asyncio
+    async def test_markdown_to_pdf_renders_valid_pdf(self):
+        """Markdown-to-PDF produces real PDF bytes and cleans up its temp file."""
+        import tempfile
+
+        from remarkable_mcp.write_tools import register_write_tools
+
+        env = {k: v for k, v in os.environ.items() if k != "REMARKABLE_USE_SSH"}
+        env.pop("REMARKABLE_USE_USB_WEB", None)
+        env.pop("REMARKABLE_READ_ONLY", None)
+        with patch.dict(os.environ, env, clear=True):
+            register_write_tools()
+            try:
+                mock_doc = Mock()
+                mock_doc.id = "id"
+                mock_client = Mock(spec=["get_meta_items", "upload_document"])
+                mock_client.get_meta_items.return_value = []
+                mock_client.upload_document.return_value = mock_doc
+
+                tmpdir = tempfile.gettempdir()
+                tmp_before = {
+                    os.path.join(tmpdir, f) for f in os.listdir(tmpdir)
+                }
+
+                with patch("remarkable_mcp.write_tools.get_rmapi", return_value=mock_client):
+                    result = await mcp.call_tool(
+                        "remarkable_markdown_to_pdf",
+                        {"markdown": "# Hello\n\n- a\n- b", "document_name": "Check"},
+                    )
+                data = json.loads(result[0][0].text)
+                assert data["uploaded"] is True
+
+                tmp_after = {
+                    os.path.join(tmpdir, f) for f in os.listdir(tmpdir)
+                }
+                leaked = tmp_after - tmp_before
+                pdf_leaks = {p for p in leaked if p.endswith(".pdf")}
+                assert not pdf_leaks, f"temp PDF left behind: {pdf_leaks}"
+            finally:
+                for name in [
+                    "remarkable_upload",
+                    "remarkable_markdown_to_pdf",
+                    "remarkable_mkdir",
+                    "remarkable_move",
+                    "remarkable_rename",
+                    "remarkable_delete",
+                ]:
+                    mcp._tool_manager._tools.pop(name, None)
 
 
 class TestCloudWriteDispatch:
@@ -2984,6 +3087,7 @@ class TestCloudWriteDispatch:
     def _cleanup(self):
         for name in [
             "remarkable_upload",
+            "remarkable_markdown_to_pdf",
             "remarkable_mkdir",
             "remarkable_move",
             "remarkable_rename",

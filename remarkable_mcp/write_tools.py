@@ -809,6 +809,170 @@ def _author_create_document(name: str, text: Optional[str], folder: Optional[str
     return make_response(result, hint)
 
 
+def _upload_document(
+    file_path: str,
+    parent_folder: str = "/",
+    document_name: Optional[str] = None,
+) -> str:
+    error = _require_write_transport()
+    if error:
+        return error
+
+    try:
+        # Validate file
+        if not os.path.isfile(file_path):
+            return make_error(
+                error_type="file_not_found",
+                message=f"File not found: '{file_path}'",
+                suggestion="Provide an absolute path to an existing PDF or EPUB file.",
+            )
+
+        ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+        if ext not in ("pdf", "epub"):
+            return make_error(
+                error_type="unsupported_format",
+                message=f"Unsupported file format: '.{ext}'",
+                suggestion="Only PDF and EPUB files can be uploaded to reMarkable.",
+            )
+
+        # Cloud mode: upload via the sync v3/v4 blob protocol
+        if _is_cloud_mode():
+            client = get_rmapi()
+            collection = client.get_meta_items()
+            items_by_id = get_items_by_id(collection)
+            parent_id = _resolve_parent_id(parent_folder, items_by_id, collection)
+            if parent_id is None:
+                folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
+                return make_error(
+                    error_type="folder_not_found",
+                    message=f"Folder not found: '{parent_folder}'",
+                    suggestion="Use remarkable_browse('/') to see available folders.",
+                    did_you_mean=folders[:5] if folders else None,
+                )
+
+            name = document_name or os.path.splitext(os.path.basename(file_path))[0]
+            with open(file_path, "rb") as f:
+                data = f.read()
+            doc = client.upload_document(data, name, ext, parent_id)
+            return make_response(
+                {
+                    "uploaded": True,
+                    "name": name,
+                    "uuid": doc.id,
+                    "format": ext,
+                    "parent_folder": parent_folder,
+                    "transport": "cloud",
+                },
+                "Document uploaded to the reMarkable cloud. "
+                "Use remarkable_browse() to verify it appears.",
+            )
+
+        # USB web mode: simple HTTP upload
+        if _is_usb_web_mode():
+            _upload_via_usb_web(file_path)
+
+            name = document_name or os.path.splitext(os.path.basename(file_path))[0]
+
+            # Clear cached documents
+            client = get_rmapi()
+            client._documents = []
+            client._documents_by_id = {}
+
+            result = {
+                "uploaded": True,
+                "name": name,
+                "format": ext,
+                "transport": "usb-web",
+            }
+            if parent_folder != "/":
+                result["note"] = (
+                    "USB web upload places files at root. "
+                    "Use SSH mode for folder placement."
+                )
+            return make_response(
+                result,
+                "Document uploaded via USB web interface. "
+                "Use remarkable_browse() to verify.",
+            )
+
+        # SSH mode: full upload with metadata
+        ssh_client = _get_ssh_client()
+        collection = ssh_client.get_meta_items()
+        items_by_id = get_items_by_id(collection)
+
+        # Resolve parent folder
+        parent_id = _resolve_parent_id(parent_folder, items_by_id, collection)
+        if parent_id is None:
+            folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
+            return make_error(
+                error_type="folder_not_found",
+                message=f"Folder not found: '{parent_folder}'",
+                suggestion="Use remarkable_browse('/') to see available folders.",
+                did_you_mean=folders[:5] if folders else None,
+            )
+
+        # Generate UUID and set name
+        doc_uuid = str(uuid.uuid4())
+        name = document_name or os.path.splitext(os.path.basename(file_path))[0]
+        timestamp_ms = str(int(time.time() * 1000))
+
+        # Upload the file
+        remote_file = f"{XOCHITL_PATH}/{doc_uuid}.{ext}"
+        _upload_file_bytes(ssh_client, file_path, remote_file)
+
+        # Create metadata
+        metadata = {
+            "visibleName": name,
+            "type": "DocumentType",
+            "parent": parent_id,
+            "deleted": False,
+            "pinned": False,
+            "lastModified": timestamp_ms,
+            "metadatamodified": True,
+            "modified": True,
+            "synced": False,
+            "version": 0,
+        }
+        _write_metadata(ssh_client, doc_uuid, metadata)
+
+        # Create content file
+        content_data = {
+            "fileType": ext,
+        }
+        _write_content_file(ssh_client, doc_uuid, content_data)
+
+        # Create the document directory (required by xochitl)
+        ssh_client._ssh_command(f"mkdir -p '{XOCHITL_PATH}/{doc_uuid}'")
+
+        # Restart xochitl to pick up changes
+        _restart_xochitl(ssh_client)
+
+        # Clear cached documents so next read picks up the new doc
+        ssh_client._documents = []
+        ssh_client._documents_by_id = {}
+
+        return make_response(
+            {
+                "uploaded": True,
+                "name": name,
+                "uuid": doc_uuid,
+                "format": ext,
+                "parent_folder": parent_folder,
+                "remote_path": remote_file,
+                "transport": "ssh",
+            },
+            "Document uploaded successfully. Use remarkable_browse() to verify it appears.",
+        )
+
+    except Exception as e:
+        transport = "USB web" if _is_usb_web_mode() else "SSH"
+        return make_error(
+            error_type="upload_failed",
+            message=f"Upload failed: {e}",
+            suggestion=f"Check {transport} connection and try again.",
+        )
+
+
 def register_write_tools():
     """Register all write tools with the MCP server."""
     # Imported lazily to break a circular import: server.py imports this module
@@ -951,165 +1115,80 @@ def register_write_tools():
         - remarkable_upload("/tmp/report.pdf", document_name="Q4 Report")
         </examples>
         """
+        def _impl() -> str:
+            return _upload_document(file_path, parent_folder, document_name)
+
+        return await asyncio.to_thread(_impl)
+
+    @mcp.tool(annotations=UPLOAD_ANNOTATIONS)
+    async def remarkable_markdown_to_pdf(
+        markdown: str,
+        document_name: Optional[str] = None,
+        parent_folder: str = "/",
+    ) -> str:
+        """
+        <usecase>Convert Markdown text to a PDF and upload it to the reMarkable tablet.</usecase>
+        <instructions>
+        Renders Markdown (headings, lists, tables, code blocks) to a PDF and
+        uploads it to the tablet in one step. Unlike remarkable_upload, the
+        content is given as text, so there is no need for a local PDF file.
+
+        Works in all three transports like remarkable_upload:
+        - Cloud: uploaded via the sync protocol; supports parent_folder + document_name
+        - SSH: transferred over SSH, metadata created; supports parent_folder + document_name
+        - USB web: uploaded via POST /upload; lands at the root (the firmware's
+          upload endpoint has no folder or rename field)
+
+        Requires write mode (the default; disabled with --read-only).
+        </instructions>
+        <parameters>
+        - markdown: Markdown source text to render (headings, lists, tables, code blocks)
+        - document_name: Display name on tablet (default: "markdown"). Honored in
+          cloud and SSH modes; ignored by the USB web interface.
+        - parent_folder: Destination folder path on tablet (default: root "/").
+          Honored in cloud and SSH modes; ignored by the USB web interface.
+        </parameters>
+        <examples>
+        - remarkable_markdown_to_pdf("# Notes\\n\\nSome **bold** text.")
+        - remarkable_markdown_to_pdf(markdown="# Report\\n\\n- a\\n- b",
+            document_name="Q4 Report", parent_folder="/Reports")
+        </examples>
+        """
 
         def _impl() -> str:
             error = _require_write_transport()
             if error:
                 return error
 
+            name = document_name or "markdown"
+            tmp_path = None
             try:
-                # Validate file
-                if not os.path.isfile(file_path):
-                    return make_error(
-                        error_type="file_not_found",
-                        message=f"File not found: '{file_path}'",
-                        suggestion="Provide an absolute path to an existing PDF or EPUB file.",
-                    )
+                # Lazy import so the server still starts if markdown-pdf is missing.
+                from markdown_pdf import MarkdownPdf, Section
 
-                ext = os.path.splitext(file_path)[1].lower().lstrip(".")
-                if ext not in ("pdf", "epub"):
-                    return make_error(
-                        error_type="unsupported_format",
-                        message=f"Unsupported file format: '.{ext}'",
-                        suggestion="Only PDF and EPUB files can be uploaded to reMarkable.",
-                    )
+                pdf = MarkdownPdf(toc_level=6)
+                pdf.add_section(Section(markdown, toc=True, paper_size="A4"))
 
-                # Cloud mode: upload via the sync v3/v4 blob protocol
-                if _is_cloud_mode():
-                    client = get_rmapi()
-                    collection = client.get_meta_items()
-                    items_by_id = get_items_by_id(collection)
-                    parent_id = _resolve_parent_id(parent_folder, items_by_id, collection)
-                    if parent_id is None:
-                        folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
-                        return make_error(
-                            error_type="folder_not_found",
-                            message=f"Folder not found: '{parent_folder}'",
-                            suggestion="Use remarkable_browse('/') to see available folders.",
-                            did_you_mean=folders[:5] if folders else None,
-                        )
+                import tempfile
 
-                    name = document_name or os.path.splitext(os.path.basename(file_path))[0]
-                    with open(file_path, "rb") as f:
-                        data = f.read()
-                    doc = client.upload_document(data, name, ext, parent_id)
-                    return make_response(
-                        {
-                            "uploaded": True,
-                            "name": name,
-                            "uuid": doc.id,
-                            "format": ext,
-                            "parent_folder": parent_folder,
-                            "transport": "cloud",
-                        },
-                        "Document uploaded to the reMarkable cloud. "
-                        "Use remarkable_browse() to verify it appears.",
-                    )
-
-                # USB web mode: simple HTTP upload
-                if _is_usb_web_mode():
-                    _upload_via_usb_web(file_path)
-
-                    name = document_name or os.path.splitext(os.path.basename(file_path))[0]
-
-                    # Clear cached documents
-                    client = get_rmapi()
-                    client._documents = []
-                    client._documents_by_id = {}
-
-                    result = {
-                        "uploaded": True,
-                        "name": name,
-                        "format": ext,
-                        "transport": "usb-web",
-                    }
-                    if parent_folder != "/":
-                        result["note"] = (
-                            "USB web upload places files at root. "
-                            "Use SSH mode for folder placement."
-                        )
-                    return make_response(
-                        result,
-                        "Document uploaded via USB web interface. "
-                        "Use remarkable_browse() to verify.",
-                    )
-
-                # SSH mode: full upload with metadata
-                ssh_client = _get_ssh_client()
-                collection = ssh_client.get_meta_items()
-                items_by_id = get_items_by_id(collection)
-
-                # Resolve parent folder
-                parent_id = _resolve_parent_id(parent_folder, items_by_id, collection)
-                if parent_id is None:
-                    folders = [get_item_path(i, items_by_id) for i in collection if i.is_folder]
-                    return make_error(
-                        error_type="folder_not_found",
-                        message=f"Folder not found: '{parent_folder}'",
-                        suggestion="Use remarkable_browse('/') to see available folders.",
-                        did_you_mean=folders[:5] if folders else None,
-                    )
-
-                # Generate UUID and set name
-                doc_uuid = str(uuid.uuid4())
-                name = document_name or os.path.splitext(os.path.basename(file_path))[0]
-                timestamp_ms = str(int(time.time() * 1000))
-
-                # Upload the file
-                remote_file = f"{XOCHITL_PATH}/{doc_uuid}.{ext}"
-                _upload_file_bytes(ssh_client, file_path, remote_file)
-
-                # Create metadata
-                metadata = {
-                    "visibleName": name,
-                    "type": "DocumentType",
-                    "parent": parent_id,
-                    "deleted": False,
-                    "pinned": False,
-                    "lastModified": timestamp_ms,
-                    "metadatamodified": True,
-                    "modified": True,
-                    "synced": False,
-                    "version": 0,
-                }
-                _write_metadata(ssh_client, doc_uuid, metadata)
-
-                # Create content file
-                content_data = {
-                    "fileType": ext,
-                }
-                _write_content_file(ssh_client, doc_uuid, content_data)
-
-                # Create the document directory (required by xochitl)
-                ssh_client._ssh_command(f"mkdir -p '{XOCHITL_PATH}/{doc_uuid}'")
-
-                # Restart xochitl to pick up changes
-                _restart_xochitl(ssh_client)
-
-                # Clear cached documents so next read picks up the new doc
-                ssh_client._documents = []
-                ssh_client._documents_by_id = {}
-
-                return make_response(
-                    {
-                        "uploaded": True,
-                        "name": name,
-                        "uuid": doc_uuid,
-                        "format": ext,
-                        "parent_folder": parent_folder,
-                        "remote_path": remote_file,
-                        "transport": "ssh",
-                    },
-                    "Document uploaded successfully. Use remarkable_browse() to verify it appears.",
-                )
-
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                    tmp_path = tmp.name
+                pdf.save(tmp_path)
             except Exception as e:
-                transport = "USB web" if _is_usb_web_mode() else "SSH"
                 return make_error(
-                    error_type="upload_failed",
-                    message=f"Upload failed: {e}",
-                    suggestion=f"Check {transport} connection and try again.",
+                    error_type="render_failed",
+                    message=f"Failed to render Markdown to PDF: {e}",
+                    suggestion="Make sure the Markdown is valid and try again.",
                 )
+
+            try:
+                return _upload_document(tmp_path, parent_folder, name)
+            finally:
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
 
         return await asyncio.to_thread(_impl)
 

@@ -88,6 +88,8 @@ def _build_instructions() -> str:
 - `remarkable_recent(limit)` - Get recently modified documents
 - `remarkable_status()` - Check connection and diagnose issues
 - `remarkable_image(document, page, include_ocr)` - Get a PNG image with optional OCR
+- `remarkable_markdown_to_pdf(markdown, document_name, parent_folder)` -
+  Convert Markdown to PDF and upload it
 
 ## Recommended Workflows
 
@@ -105,6 +107,11 @@ Use `remarkable_image` when you need visual context:
 
 Example: `remarkable_image("UI Mockup", page=1)` returns a PNG image
 Example: `remarkable_image("Notes", include_ocr=True)` returns image with extracted text
+
+### Sending Markdown to the Tablet
+Use `remarkable_markdown_to_pdf(markdown, document_name, parent_folder)` when
+the user wants a written document (notes, reports, summaries) delivered as a
+readable PDF on the tablet. Pass the Markdown text directly — no file needed.
 
 ### For Large Documents
 Use pagination to avoid overwhelming context. The response includes:
@@ -149,6 +156,8 @@ You're connected directly to the tablet via SSH. This enables:
 Write operations are enabled. These tools modify your tablet's filesystem:
 
 - `remarkable_upload(file_path, parent_folder, document_name)` - Upload a PDF/EPUB
+- `remarkable_markdown_to_pdf(markdown, document_name, parent_folder)` -
+  Convert Markdown to PDF and upload
 - `remarkable_mkdir(folder_name, parent)` - Create a folder
 - `remarkable_move(document, dest_folder)` - Move a document/folder
 - `remarkable_rename(document, new_name)` - Rename a document/folder
@@ -168,6 +177,7 @@ Write operations are enabled. These tools modify your tablet's filesystem:
 Upload is available via the USB web interface:
 
 - `remarkable_upload(file_path)` - Upload a PDF/EPUB file
+- `remarkable_markdown_to_pdf(markdown)` - Convert Markdown to PDF and upload
 
 Note: mkdir, move, rename, and delete require SSH mode.
 """
@@ -189,6 +199,8 @@ Write operations are enabled (the default). These tools modify your cloud librar
 and sync to all your devices:
 
 - `remarkable_upload(file_path, parent_folder, document_name)` - Upload a PDF/EPUB
+- `remarkable_markdown_to_pdf(markdown, document_name, parent_folder)` -
+  Convert Markdown to PDF and upload
 - `remarkable_mkdir(folder_name, parent)` - Create a folder
 - `remarkable_move(document, dest_folder)` - Move a document/folder
 - `remarkable_rename(document, new_name)` - Rename a document/folder

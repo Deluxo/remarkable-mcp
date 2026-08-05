@@ -78,3 +78,6 @@ BLOG_DRAFT.md
 
 # Smoke-test run artifacts (regenerated on every run)
 smoke/snapshots/
+
+# direnv / nix local state
+.direnv/
