@@ -18,29 +18,17 @@ let
   service = config.systemd.services.remarkable-mcp-bridge;
   unitText = config.systemd.units."remarkable-mcp-bridge.service".text;
 in
-  # Service runs as the expected user
   assert service.serviceConfig.User == "remarkable-mcp";
   assert service.serviceConfig.Group == "remarkable-mcp";
-
-  # HOME points to the configured home dir
   assert service.environment.HOME == "/var/lib/remarkable-mcp";
-
-  # Security settings are enforced
   assert service.serviceConfig.NoNewPrivileges;
   assert service.serviceConfig.PrivateTmp;
 
-  # tesseract is always in path
   assert builtins.elem testPkgs.tesseract service.path;
-
-  # The command points to the package's bin directory
   assert builtins.match ".*bin/remarkable-mcp.*" service.serviceConfig.ExecStart != null;
-
-  # ExecStart contains the flag arguments
   assert builtins.match ".*--http.*" service.serviceConfig.ExecStart != null;
   assert builtins.match ".*--host.*" service.serviceConfig.ExecStart != null;
   assert builtins.match ".*--port.*" service.serviceConfig.ExecStart != null;
-
-  # unitText is a valid unit string
   assert builtins.isString unitText;
   assert builtins.stringLength unitText > 0;
 

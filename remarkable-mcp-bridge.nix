@@ -30,8 +30,6 @@ in
       description = "Whether this module should create the configured service user and group.";
     };
 
-    # ── Package selection ──────────────────────────────────────────────
-
     package = lib.mkOption {
       type = lib.types.package;
       default = defaultPackage;
@@ -59,8 +57,6 @@ in
       default = "${cfg.package}/bin/remarkable-mcp";
     };
 
-    # ── Network ────────────────────────────────────────────────────────
-
     host = lib.mkOption {
       type = lib.types.str;
       default = "127.0.0.1";
@@ -76,8 +72,6 @@ in
       default = 8000;
       description = "TCP port for the Streamable HTTP endpoint.";
     };
-
-    # ── Service user ───────────────────────────────────────────────────
 
     home = lib.mkOption {
       type = lib.types.str;
