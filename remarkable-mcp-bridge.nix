@@ -1,8 +1,11 @@
 { config, lib, pkgs, ... }:
-
 let
   cfg = config.services.remarkable-mcp;
   loopbackHosts = [ "127.0.0.1" "::1" "localhost" ];
+
+  # Default package: build from remarkable-mcp.nix using the same pkgs
+  # that the module receives (so overlays etc. apply)
+  defaultPackage = (pkgs.callPackage ./remarkable-mcp.nix {}).package;
 in
 {
   options.services.remarkable-mcp = {
@@ -27,11 +30,36 @@ in
       description = "Whether this module should create the configured service user and group.";
     };
 
+    # ── Package selection ──────────────────────────────────────────────
+
+    package = lib.mkOption {
+      type = lib.types.package;
+      default = defaultPackage;
+      defaultText = "import ./remarkable-mcp.nix {}";
+      description = ''
+        The remarkable-mcp package to use for the service.
+
+        By default this is built using <command>nix-build
+        remarkable-mcp.nix</command>. To override with a custom version:
+
+        <programlisting>
+        { services.remarkable-mcp.package = pkgs.remarkable-mcp.override { version = "0.2.0"; }; }
+        </programlisting>
+      '';
+    };
+
     command = lib.mkOption {
       type = lib.types.str;
-      default = "/opt/remarkable-mcp/.venv/bin/remarkable-mcp";
-      description = "Path to the installed remarkable-mcp executable.";
+      description = ''
+        Path to the remarkable-mcp executable.
+
+        Defaults to <literal>''${cfg.package}/bin/remarkable-mcp</literal>.
+        Only change this if you installed remarkable-mcp via a non-standard method.
+      '';
+      default = "${cfg.package}/bin/remarkable-mcp";
     };
+
+    # ── Network ────────────────────────────────────────────────────────
 
     host = lib.mkOption {
       type = lib.types.str;
@@ -48,6 +76,8 @@ in
       default = 8000;
       description = "TCP port for the Streamable HTTP endpoint.";
     };
+
+    # ── Service user ───────────────────────────────────────────────────
 
     home = lib.mkOption {
       type = lib.types.str;
@@ -94,7 +124,10 @@ in
       description = "reMarkable MCP Streamable HTTP bridge";
       wantedBy = [ "multi-user.target" ];
       after = [ "network.target" ];
-      path = [ pkgs.tesseract ];
+      path = [
+        pkgs.tesseract
+        cfg.package
+      ];
       environment = cfg.extraEnvironment // {
         HOME = toString cfg.home;
       };
